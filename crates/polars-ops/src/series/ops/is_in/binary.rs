@@ -23,6 +23,7 @@ pub(super) struct BinaryLookup {
 }
 
 enum BinaryLookupKind {
+    SmallInline(Vec<(u128, u128)>),
     Small(Vec<View>),
     Hash(HashTable<View>),
 }
@@ -89,7 +90,19 @@ impl BinaryLookup {
         }
 
         let kind = if table.len() <= SMALL_MAX {
-            BinaryLookupKind::Small(table.into_iter().collect())
+            let views: Vec<View> = table.into_iter().collect();
+            if views.iter().all(View::is_inline) {
+                let keys = views
+                    .into_iter()
+                    .map(|view| {
+                        let mask = u128::MAX >> ((View::MAX_INLINE_SIZE - view.length) * 8);
+                        (mask, view.as_u128() & mask)
+                    })
+                    .collect();
+                BinaryLookupKind::SmallInline(keys)
+            } else {
+                BinaryLookupKind::Small(views)
+            }
         } else {
             BinaryLookupKind::Hash(table)
         };
@@ -107,12 +120,18 @@ impl BinaryLookup {
         if (self.len_mask >> view.length.min(63)) & 1 == 0 {
             return false;
         }
-        let key = view.is_inline().then(|| inline_key(view));
         match &self.kind {
-            BinaryLookupKind::Small(views) => views
-                .iter()
-                .any(|&stored| eq_stored(&self.buffers, stored, view, key, bytes)),
+            BinaryLookupKind::SmallInline(keys) => {
+                view.is_inline() && keys.iter().any(|&(mask, key)| view.as_u128() & mask == key)
+            },
+            BinaryLookupKind::Small(views) => {
+                let key = view.is_inline().then(|| inline_key(view));
+                views
+                    .iter()
+                    .any(|&stored| eq_stored(&self.buffers, stored, view, key, bytes))
+            },
             BinaryLookupKind::Hash(table) => {
+                let key = view.is_inline().then(|| inline_key(view));
                 let hash = match key {
                     Some(key) => self.hasher.hash_one(key),
                     None => self.hasher.hash_one(bytes),
