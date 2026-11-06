@@ -5,6 +5,7 @@ use hashbrown::hash_map::Entry;
 use polars_buffer::Buffer;
 use polars_utils::IdxSize;
 use polars_utils::aliases::{InitHashMaps, PlHashMap};
+use polars_utils::mem::prefetch::prefetch_l1;
 
 use crate::array::binview::{
     BINVIEW_ARROW_BUFFER_LEN_LIMIT, DEFAULT_BLOCK_SIZE, MAX_EXP_BLOCK_SIZE,
@@ -423,9 +424,14 @@ impl<V: ViewType + ?Sized> StaticArrayBuilder for BinaryViewArrayGenericBuilder<
                 },
                 ShareStrategy::Always => {
                     let other_view_slice = other.views().as_slice();
-                    let other_views = idxs
-                        .iter()
-                        .map(|idx| *other_view_slice.get_unchecked(*idx as usize));
+                    let other_views = idxs.iter().enumerate().map(|(i, idx)| {
+                        if let Some(&future_idx) = idxs.get(i + 16) {
+                            let future_view =
+                                other_view_slice.as_ptr().wrapping_add(future_idx as usize);
+                            prefetch_l1(future_view.cast());
+                        }
+                        *other_view_slice.get_unchecked(*idx as usize)
+                    });
                     self.extend_views_dedup_ignore_validity(other_views, other.data_buffers());
                 },
             }
